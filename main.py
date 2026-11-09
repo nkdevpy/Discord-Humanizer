@@ -27,7 +27,7 @@ script_dir = Path(__file__).parent
 data_dir = script_dir / "data"
 input_dir = script_dir / "input"
 output_dir = script_dir / "output"
-avatars_dir = script_dir / "avatar"
+avatars_dir = script_dir / "avatars" if (script_dir / "avatars").exists() else script_dir / "avatar"
 banners_dir = script_dir / "banners"
 
 tokens_file = input_dir / "tokens.txt"
@@ -115,7 +115,55 @@ update_hypesquad = config.get("update_hypesquad", True)
 retry_limit = config.get("retry_limit", 1)
 use_proxy = config.get("proxy", True)
 
-def generate_super_properties(tok: str, launch_id: str, signature: str, heartbeat_id: str) -> str:
+cf_cookies_cache = None
+cf_cookies_cache_time = 0.0
+cf_fingerprint_cache = None
+cf_cookies_lock = threading.Lock()
+
+def get_discord_cf_cookies_and_fingerprint(proxy_arg: Optional[str] = None) -> tuple:
+    """
+    Fetch live Cloudflare cookies (__dcfduid, __sdcfduid, _cfuvid, locale) and X-Fingerprint
+    from Discord API experiments endpoint via primp (Cwelium methodology).
+    Cached for 10 minutes to minimize network roundtrips.
+    """
+    global cf_cookies_cache, cf_cookies_cache_time, cf_fingerprint_cache
+    now = time.time()
+    with cf_cookies_lock:
+        if cf_cookies_cache and (now - cf_cookies_cache_time) < 600:
+            return cf_cookies_cache, cf_fingerprint_cache or ""
+
+    fallback_cookies = (
+        "__dcfduid=62f9e16000a211ef8089eda5bffbf7f9; "
+        "__sdcfduid=62f9e16100a211ef8089eda5bffbf7f98e904ba04346eacdf57ee4af97bdd94e4c16f7df1db5132bea9132dd26b21a2a; "
+        "__cfruid=a2ccd7637937e6a41e6888bdb6e8225cd0a6f8e0-1714045775; "
+        "_cfuvid=s_CLUzmUvmiXyXPSv91CzlxP00pxRJpqEhuUgJql85Y-1714045775095-0.0.1.1-604800000; locale=en-US"
+    )
+    fallback_fingerprint = ""
+
+    try:
+        exp_client = primp.Client(verify=False, proxy=proxy_arg)
+        exp_res = exp_client.get("https://discord.com/api/v9/experiments", timeout=12)
+        cookies_list = [f"{k}={v}" for k, v in exp_res.cookies.items()]
+        if cookies_list:
+            cookie_str = "; ".join(cookies_list) + "; locale=en-US"
+        else:
+            cookie_str = fallback_cookies
+
+        fp = ""
+        try:
+            fp = exp_res.json().get("fingerprint", "")
+        except Exception:
+            fp = fallback_fingerprint
+
+        with cf_cookies_lock:
+            cf_cookies_cache = cookie_str
+            cf_fingerprint_cache = fp
+            cf_cookies_cache_time = now
+        return cookie_str, fp
+    except Exception:
+        return fallback_cookies, fallback_fingerprint
+
+def generate_super_properties(launch_id: str, signature: str, heartbeat_id: str) -> str:
     props = {
         "os": "Windows",
         "browser": "Chrome",
@@ -125,10 +173,10 @@ def generate_super_properties(tok: str, launch_id: str, signature: str, heartbea
         "browser_user_agent": chrome_ua,
         "browser_version": chrome_version,
         "os_version": "10",
-        "referrer": f"https://discord.com/?discordtoken={tok}",
+        "referrer": "https://discord.com/channels/@me",
         "referring_domain": "discord.com",
-        "referrer_current": f"https://discord.com/?discordtoken={tok}",
-        "referring_domain_current": "discord.com",
+        "referrer_current": "",
+        "referring_domain_current": "",
         "release_channel": "stable",
         "client_build_number": build_number,
         "client_event_source": None,
@@ -527,13 +575,15 @@ class Humanizer:
 
     def build_headers(self, real_sid: Optional[str]) -> Dict[str, str]:
         heartbeat = real_sid if real_sid else self.heartbeat_id
-        super_props = generate_super_properties(self.token, self.launch_id, self.signature, heartbeat)
-        return {
+        super_props = generate_super_properties(self.launch_id, self.signature, heartbeat)
+        cf_cookies, fp = get_discord_cf_cookies_and_fingerprint(self.proxy_arg)
+        h = {
             "accept": "*/*",
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": "en-US,en;q=0.9",
             "authorization": self.token,
             "content-type": "application/json",
+            "cookie": cf_cookies,
             "origin": "https://discord.com",
             "referer": "https://discord.com/channels/@me",
             "sec-ch-ua": '"Chromium";v="146", "Google Chrome";v="146", "Not/A)Brand";v="99"',
@@ -549,6 +599,9 @@ class Humanizer:
             "x-installation-id": self.installation_id,
             "x-super-properties": super_props,
         }
+        if fp:
+            h["x-fingerprint"] = fp
+        return h
 
     def clean_error(self, error) -> str:
         error = str(error)
@@ -686,19 +739,10 @@ class Humanizer:
                 avatar_path = random.choice(avatar_files)
                 avatar_b64 = avatar_loader(avatar_path)
                 if avatar_b64:
-                    with open(avatar_path, "rb") as af:
-                        raw_data = af.read()
-                    raw_md5 = hashlib.md5(raw_data).hexdigest()
-
-                    now_str = datetime.now().strftime("%B %d, %Y at %I:%M %p")
                     account_payload = {
-                        "avatar": avatar_b64,
-                        "avatar_description": f"{avatar_path.stem}, added {now_str}"
+                        "avatar": avatar_b64
                     }
-                    av_headers = dict(headers)
-                    av_headers["X-Discord-Original-MD5"] = f'user_default_profile_avatar="{raw_md5}"'
-
-                    res = self.api_call_with_retry("patch", f"{discordapi}/users/@me", account_payload, av_headers)
+                    res = self.api_call_with_retry("patch", f"{discordapi}/users/@me", account_payload, headers)
                     if res.get("success"):
                         log("SUCCESS", self.token, f"[Avatar Updated : {avatar_path.name}]")
                     elif res.get("captcha"):
