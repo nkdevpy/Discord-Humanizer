@@ -1,4 +1,5 @@
 # Discord Account Humanizer
+## Discord User: nkdev.hsl
 
 A tool that bulk-customizes Discord accounts. Updates avatars, display names, bios, pronouns, and HypeSquad houses across many accounts at once.
 
