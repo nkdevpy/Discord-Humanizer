@@ -69,7 +69,7 @@ Change these to whatever you want updated:
 python main.py
 ```
 
-Type the thread count when it asks (or hit `Enter` to use the config default) and let it run. Done accounts go to `output/success.txt` and get removed from `input/tokens.txt`.
+Type the thread count when it asks (or hit `Enter` to use the config default) and let it run. Done accounts go to `output/success.txt` and get removed from `input/tokens.txt`. do not skid this or resell this, this is free and open source
 
 ---
 
